@@ -28,17 +28,5 @@ namespace ConsoleTool
 			MetaFilePath = fileData.MetaFilePath;
 			Extension = fileData.Extension;
 		}
-
-		public bool IsEmpty()
-		{
-			if(Name == string.Empty || FilePath == string.Empty || Extension == string.Empty)
-				return true;
-			return false;
-		}
-
-		public static FileData Empty()
-		{
-			return new FileData();
-		}
 	}
 }

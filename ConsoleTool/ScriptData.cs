@@ -8,61 +8,67 @@ namespace ConsoleTool;
 
 public class ScriptData
 {
-    public string Name { get; private set; }
-    public string GUID { get; private set; }
-    public HashSet<string> serializedField {get; private set;}
+    public string Name { get; }
+    public string GUID { get; }
+    public HashSet<string> SerializedFields { get; }
 
     public ScriptData(FileData scriptData, SyntaxTree syntaxTree, CSharpCompilation compilation)
     {
         try
         {
             Name = scriptData.Name;
-            GUID = ParseMetaFileData(scriptData.MetaFilePath);
-            serializedField = GetSerializedFields(syntaxTree, compilation);
+            GUID = ParseGuidFromMeta(scriptData.MetaFilePath);
+            SerializedFields = ExtractSerializedFields(syntaxTree, compilation);
         }
         catch (Exception e)
         {
+            Console.WriteLine($"[ScriptData] Failed to process '{scriptData.Name}': {e.Message}");
             Name = string.Empty;
             GUID = string.Empty;
-            serializedField = new HashSet<string>();
-            Console.WriteLine(e);
+            SerializedFields = new HashSet<string>();
         }
     }
 
-    private HashSet<string> GetSerializedFields(
-        SyntaxTree tree,
-        CSharpCompilation compilation)
+    private static HashSet<string> ExtractSerializedFields(SyntaxTree tree, CSharpCompilation compilation)
     {
         var model = compilation.GetSemanticModel(tree);
-
-        var serializableFields = new HashSet<string>();
         var root = tree.GetRoot();
+
+        var result = new HashSet<string>();
         var fields = root.DescendantNodes().OfType<FieldDeclarationSyntax>();
 
         foreach (var field in fields)
         {
-            if (UnitySerializationAnalyzer.IsUnitySerializedField(field, model))
-            {
-                var name = field.Declaration.Variables.First().Identifier.Text;
-                serializableFields.Add(name);
-            }
+            if (!UnitySerializationAnalyzer.IsUnitySerializedField(field, model))
+                continue;
+
+            var variable = field.Declaration.Variables.FirstOrDefault();
+            if (variable != null)
+                result.Add(variable.Identifier.Text);
         }
-        return serializableFields;
+
+        return result;
     }
 
-    private string ParseMetaFileData(string scriptMetaFilePath)
+    private static string ParseGuidFromMeta(string metaFilePath)
     {
-        
-        using var reader = new StreamReader(scriptMetaFilePath);
+        if (!File.Exists(metaFilePath))
+            throw new FileNotFoundException($"Meta file not found for script: {metaFilePath}");
 
+        using var reader = new StreamReader(metaFilePath);
         var yaml = new YamlStream();
         yaml.Load(reader);
-        
-        var root = (YamlMappingNode)yaml.Documents[0].RootNode;
-        
-        var guidNode = (YamlScalarNode)root.Children[new YamlScalarNode("guid")];
-        string? guid = guidNode.Value;
-        
-        return guid ?? throw new Exception($"File '{scriptMetaFilePath}' hasn't valid GUID.");
+
+        if (yaml.Documents.Count == 0)
+            throw new InvalidDataException($"Meta file '{metaFilePath}' is empty or invalid.");
+
+        var root = yaml.Documents[0].RootNode as YamlMappingNode
+                   ?? throw new InvalidDataException($"Meta file '{metaFilePath}' has invalid structure.");
+
+        if (!root.Children.TryGetValue(new YamlScalarNode("guid"), out var guidNode))
+            throw new InvalidDataException($"Meta file '{metaFilePath}' does not contain 'guid'.");
+
+        var guid = (guidNode as YamlScalarNode)?.Value;
+        return guid ?? throw new InvalidDataException($"Meta file '{metaFilePath}' has empty GUID field.");
     }
 }

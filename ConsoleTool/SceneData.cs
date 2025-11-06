@@ -7,10 +7,10 @@ namespace ConsoleTool;
 
 public class SceneData
 {
-    private string _name;
-    private Dictionary<long, int> _componentClassById = new();
-    private Dictionary<long, SceneGameObjectInfo> _objects = new();
-    private HashSet<SceneBehaviourInfo> _scriptsInfo = new();
+    private readonly string _name;
+    private readonly Dictionary<long, int> _componentClassById = new();
+    private readonly Dictionary<long, SceneGameObjectInfo> _objects = new();
+    private readonly HashSet<SceneBehaviourInfo> _scriptsInfo = new();
 
     public SceneData(FileData sceneFile)
     {
@@ -18,17 +18,14 @@ public class SceneData
         GetClassIDs(sceneFile.FilePath);
         ParseScene(sceneFile.FilePath);
     }
-    
+
+    #region Hierarchy Dump
     public void CreateHierarchyDump(string storePath)
     {
-        if (!Directory.Exists(storePath))
-            Directory.CreateDirectory(storePath);
-
+        Directory.CreateDirectory(storePath);
         string dumpPath = Path.Combine(storePath, $"{_name}.dump");
 
-
         using var writer = new StreamWriter(dumpPath);
-        
         foreach (var root in _objects.Values.Where(o => o.ParentId == 0))
             WriteNodeRecursive(root, 0, writer);
     }
@@ -36,183 +33,191 @@ public class SceneData
     private void WriteNodeRecursive(SceneGameObjectInfo obj, int indent, StreamWriter writer)
     {
         writer.WriteLine($"{new string(' ', indent * 2)}- {obj.Name}");
-
         foreach (var childId in obj.Children)
-        {
             if (_objects.TryGetValue(childId, out var child))
                 WriteNodeRecursive(child, indent + 1, writer);
-        }
     }
-    
+    #endregion
+
+    #region Script Usage
     public bool IsUnusedScript(ScriptData script, HashSet<ScriptData> allScripts)
     {
-        bool isAttachedToGameObject = _scriptsInfo.Any(s => s.Guid == script.GUID);
-        if (isAttachedToGameObject)
+        if (_scriptsInfo.Any(s => s.Guid == script.GUID))
             return false;
         
-        bool referencedInScene = false;
-
         foreach (var behaviour in _scriptsInfo)
         {
-            foreach (var serializedRef in behaviour.SerializedFieldsByGuid)
+            foreach (var (referencedGuid, referencedField) in behaviour.SerializedFieldsByGuid)
             {
-                var referencedGuid = serializedRef.Key;
-                var referencedFieldName = serializedRef.Value;
+                if (referencedGuid != script.GUID)
+                    continue;
 
-                if (referencedGuid == script.GUID)
-                {
-                    referencedInScene = true;
-                    
-                    bool fieldExistsInCSharp = allScripts.Any(t => t.serializedField.Contains(referencedFieldName));
+                bool fieldExists = allScripts.Any(s => s.SerializedFields.Contains(referencedField));
+                if (fieldExists)
+                    return false;
 
-                    if (fieldExistsInCSharp)
-                        return false;
-                }
+                return true;
             }
         }
-        
-        if (referencedInScene)
-            return true;
-        
+
         return true;
     }
+    #endregion
 
-    
+    #region Scene Parsing
     private void ParseScene(string filePath)
     {
-         using var reader = new StreamReader(filePath);
-         
-        var yaml = new YamlStream();
-        yaml.Load(reader);
-        
-        foreach (var doc in yaml.Documents)
+        foreach (var doc in LoadYamlDocuments(filePath))
         {
-            var root = (YamlMappingNode)doc.RootNode;
-            
-            foreach (var entry in root.Children)
+            if (doc.RootNode is not YamlMappingNode root)
+                continue;
+
+            foreach (var (key, value) in root.Children)
             {
-                string unityType = entry.Key.ToString();
-                var anchor = doc.RootNode.Anchor;
-                long fileId = long.Parse(anchor.ToString());
-                var dataNode = (YamlMappingNode)entry.Value;
-                
+                string unityType = key.ToString();
+                long fileId = long.Parse(doc.RootNode.Anchor.ToString());
+                var dataNode = (YamlMappingNode)value;
+
                 if (unityType.Contains("GameObject"))
-                {
-                    var go = new SceneGameObjectInfo()
-                    {
-                        TransformId = GetTransformIdFromGameObject(dataNode),
-                        Name = dataNode.Children[new YamlScalarNode("m_Name")].ToString()
-                    };
+                    ParseGameObject(dataNode);
 
-                    _objects[go.TransformId] = go;
-                }
-                
-                if (unityType.Contains("Transform"))
-                {
-                    if (!_objects.TryGetValue(fileId, out var go))
-                        go = _objects[fileId] = new SceneGameObjectInfo() { TransformId = fileId };
-                    
-                    var fatherNode = (YamlMappingNode)dataNode.Children[new YamlScalarNode("m_Father")];
-                    go.ParentId = long.Parse(fatherNode.Children[new YamlScalarNode("fileID")].ToString());
-                    
-                    if (dataNode.Children.TryGetValue(new YamlScalarNode("m_Children"), out var childrenNode))
-                    {
-                        foreach (var yamlNode in (YamlSequenceNode)childrenNode)
-                        {
-                            var childRef = (YamlMappingNode)yamlNode;
-                            long childId = long.Parse(childRef.Children[new YamlScalarNode("fileID")].ToString());
-                            go.Children.Add(childId);
-                        }
-                    }
-                }
-                if (unityType.Contains("MonoBehaviour"))
-                { 
-                    var scriptNode = (YamlMappingNode)dataNode.Children[new YamlScalarNode("m_Script")];
-                    var guid = scriptNode.Children[new YamlScalarNode("guid")].ToString();
-                    var info = new SceneBehaviourInfo { Guid = guid, FileId = fileId};
-                    bool readingFields = false;
-                    foreach (var yamlField in dataNode.Children)
-                    {
-                        var key = yamlField.Key.ToString();
-                        if (key == "m_Script")
-                        {
-                            readingFields = true; continue;
-                        }
+                else if (unityType.Contains("Transform"))
+                    ParseTransform(fileId, dataNode);
 
-                        if (readingFields)
-                        {
-                            if (key.StartsWith("m_")) continue;
-                            var scripComponents = (YamlMappingNode)dataNode.Children[new YamlScalarNode(key)];
-                            if (scripComponents.Children.TryGetValue(new YamlScalarNode("guid"), out var guidNode))
-                            {
-                                var referencedGuid = guidNode.ToString();
-                                info.SerializedFieldsByGuid[referencedGuid] = key;
-                            }
-                            else
-                            {
-                                var referenceFileId = long.Parse(scripComponents.Children[new YamlScalarNode("fileID")].ToString());
-                                if (_componentClassById[referenceFileId] == 114)
-                                {
-                                    foreach (var scriptInfo in _scriptsInfo)
-                                    {
-                                        if (scriptInfo.FileId == referenceFileId)
-                                        {
-                                            info.SerializedFieldsByGuid[scriptInfo.Guid] = key;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } 
-                    _scriptsInfo.Add(info);
-                    
-                }
+                else if (unityType.Contains("MonoBehaviour"))
+                    ParseMonoBehaviour(fileId, dataNode);
             }
         }
+    }
+
+    private void ParseGameObject(YamlMappingNode dataNode)
+    {
+        var go = new SceneGameObjectInfo
+        {
+            TransformId = GetTransformIdFromGameObject(dataNode),
+            Name = dataNode[new YamlScalarNode("m_Name")].ToString()
+        };
+        _objects[go.TransformId] = go;
+    }
+
+    private void ParseTransform(long fileId, YamlMappingNode dataNode)
+    {
+        if (!_objects.TryGetValue(fileId, out var go))
+            go = _objects[fileId] = new SceneGameObjectInfo { TransformId = fileId };
+
+        if (dataNode.Children.TryGetValue(new YamlScalarNode("m_Father"), out var fatherNode))
+            go.ParentId = long.Parse(((YamlMappingNode)fatherNode)["fileID"].ToString());
+
+        if (dataNode.Children.TryGetValue(new YamlScalarNode("m_Children"), out var childrenNode))
+        {
+            foreach (var yamlNode in (YamlSequenceNode)childrenNode)
+            {
+                var childRef = (YamlMappingNode)yamlNode;
+                go.Children.Add(long.Parse(childRef["fileID"].ToString()));
+            }
+        }
+    }
+
+    private void ParseMonoBehaviour(long fileId, YamlMappingNode dataNode)
+    {
+        var scriptNode = (YamlMappingNode)dataNode["m_Script"];
+        var info = new SceneBehaviourInfo
+        {
+            FileId = fileId,
+            Guid = scriptNode["guid"].ToString()
+        };
+
+        bool readingFields = false;
+
+        foreach (var (keyNode, valueNode) in dataNode.Children)
+        {
+            string key = keyNode.ToString();
+
+            if (key == "m_Script") { readingFields = true; continue; }
+            if (!readingFields || key.StartsWith("m_")) continue;
+
+            switch (valueNode)
+            {
+                case YamlMappingNode fieldMap:
+                    ParseFieldNode(fieldMap, key, info);
+                    break;
+
+                case YamlSequenceNode seqNode:
+                    foreach (var element in seqNode.Children)
+                    {
+                        if (element is YamlMappingNode elemMap)
+                            ParseFieldNode(elemMap, key, info);
+                    }
+                    break;
+            }
+        }
+
+        _scriptsInfo.Add(info);
+    }
+
+    private void ParseFieldNode(YamlMappingNode fieldMap, string key, SceneBehaviourInfo info)
+    {
+        if (fieldMap.Children.TryGetValue(new YamlScalarNode("guid"), out var guidNode))
+        {
+            info.SerializedFieldsByGuid[guidNode.ToString()] = key;
+        }
+        else if (fieldMap.Children.TryGetValue(new YamlScalarNode("fileID"), out var fileNode))
+        {
+            if (long.TryParse(fileNode.ToString(), out long refId)
+                && _componentClassById.TryGetValue(refId, out int classId)
+                && classId == 114)
+            {
+                var match = _scriptsInfo.FirstOrDefault(s => s.FileId == refId);
+                if (match != null)
+                    info.SerializedFieldsByGuid[match.Guid] = key;
+            }
+        }
+    }
+
+    #endregion
+
+    #region Helpers
+    private IEnumerable<YamlDocument> LoadYamlDocuments(string filePath)
+    {
+        using var reader = new StreamReader(filePath);
+        var yaml = new YamlStream();
+        yaml.Load(reader);
+        return yaml.Documents;
     }
 
     private void GetClassIDs(string filePath)
     {
-        using var reader = new StreamReader(filePath);
-         
-        var yaml = new YamlStream();
-        yaml.Load(reader);
-
-        foreach (var doc in yaml.Documents)
+        foreach (var doc in LoadYamlDocuments(filePath))
         {
-            var tag = doc.RootNode.Tag;
-            var anchor = doc.RootNode.Anchor;
-            int classId = int.Parse(tag.ToString().Replace("tag:unity3d.com,2011:", ""));
-            long fileId = long.Parse(anchor.ToString());
-
+            int classId = int.Parse(doc.RootNode.Tag.ToString().Replace("tag:unity3d.com,2011:", ""));
+            long fileId = long.Parse(doc.RootNode.Anchor.ToString());
             _componentClassById[fileId] = classId;
         }
     }
 
     private long GetTransformIdFromGameObject(YamlMappingNode dataNode)
     {
-        var mComponents = (YamlSequenceNode)dataNode.Children[new YamlScalarNode("m_Component")];
-
-        foreach (var yamlNode in mComponents)
+        var components = (YamlSequenceNode)dataNode["m_Component"];
+        foreach (var yamlNode in components)
         {
-            var component = (YamlMappingNode)yamlNode;
-            var componentNode = (YamlMappingNode)component.Children[new YamlScalarNode("component")];
-            var fileId = long.Parse(componentNode.Children[new YamlScalarNode("fileID")].ToString());
-            
-            if (_componentClassById[fileId] == 4)
-                return fileId;
+            var node = (YamlMappingNode)yamlNode;
+            var comp = (YamlMappingNode)node["component"];
+            long id = long.Parse(comp["fileID"].ToString());
+            if (_componentClassById.TryGetValue(id, out int classId) && classId == 4)
+                return id;
         }
         return -1;
     }
+    #endregion
 
+    #region Inner Classes
     private class SceneBehaviourInfo
     {
-        public long FileId = 0;
+        public long FileId;
         public string Guid = string.Empty;
-        public Dictionary<GUID, ScriptName> SerializedFieldsByGuid = new();
+        public readonly Dictionary<GUID, ScriptName> SerializedFieldsByGuid = new();
     }
-    
+
     private class SceneGameObjectInfo
     {
         public long TransformId;
@@ -220,6 +225,5 @@ public class SceneData
         public long ParentId;
         public readonly List<long> Children = new();
     }
-
-
+    #endregion
 }

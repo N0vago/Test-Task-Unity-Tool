@@ -1,182 +1,200 @@
-﻿using Microsoft.CodeAnalysis;
+﻿using System.Collections.Concurrent;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace ConsoleTool
 {
     public static class Program
-    {
+    { 
         static void Main(string[] args)
+    {
+        if (!IsValidArgs(args, out var projectPath))
+            return;
+
+        string assetsPath = Path.Combine(projectPath, "Assets");
+
+        var scenes = GetSceneFiles(assetsPath);
+        var scripts = GetScriptFiles(assetsPath);
+
+        if (scenes.Length == 0)
         {
-            if (!ValidateProject(args, out var projectPath)) return;
-            
-            string assetsPath = Path.Combine(projectPath, "Assets");
-            
-            FileData[] sceneData = GetSceneFiles(assetsPath);
-            FileData[] scriptDatas = GetScriptFiles(assetsPath);
-            
-            Dictionary<string, SyntaxTree> allTrees = GetAllSyntaxTrees(scriptDatas);
-            
-            var compilation = CSharpCompilation.Create(
-                "UnityProjectAnalysis",
-                allTrees.Values,
-                UnitySerializationAnalyzer.UnityReferences,
-                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-            );
-            
-            FileData[] monoBehaviorScriptFiles = GetMonoBehaviourScriptFiles(scriptDatas, allTrees, compilation);
-            
-            if (sceneData.Length == 0)
+            Console.WriteLine($"Error: '{assetsPath}' doesn't contain any scene files.");
+            return;
+        }
+
+        if (scripts.Length == 0)
+        {
+            Console.WriteLine($"Error: '{assetsPath}' doesn't contain any script files.");
+            return;
+        }
+
+        var syntaxTrees = GetAllSyntaxTrees(scripts);
+        var compilation = CreateCompilation(syntaxTrees.Values);
+        var monoBehaviourScripts = GetMonoBehaviourScripts(scripts, syntaxTrees, compilation);
+
+        var sceneData = GetSceneDatas(scenes);
+        var scriptData = monoBehaviourScripts
+            .Select(file => new ScriptData(file, syntaxTrees[file.FilePath], compilation))
+            .ToList();
+
+        var unusedScripts = new HashSet<ScriptData>(scriptData);
+
+        foreach (var scene in sceneData)
+        {
+            scene.CreateHierarchyDump(args[1]);
+
+            foreach (var script in scriptData)
             {
-                Console.WriteLine($"Error: '{assetsPath}' doesn't contain any scene files.");
-                return;
-            }
-            if (scriptDatas.Length == 0)
-            {
-                Console.WriteLine($"Error: '{assetsPath}' doesn't contain any script files.");
+                if (unusedScripts.Contains(script) && !scene.IsUnusedScript(script, scriptData.ToHashSet()))
+                    unusedScripts.Remove(script);
             }
 
-            List<SceneData> scenes = new();
-            List<ScriptData> scripts = new();
-            
-            foreach (var scenePath in sceneData)
-            {
-                scenes.Add(new SceneData(scenePath));
-            }
+            if (unusedScripts.Count == 0)
+                break;
+        }
 
-            foreach (var scriptData in monoBehaviorScriptFiles)
+        SaveScriptsInfoToFile(unusedScripts, Path.Combine(args[1], "UnusedScripts.txt"));
+    }
+
+    private static List<SceneData> GetSceneDatas(FileData[] sceneFiles)
+    {
+        var results = new ConcurrentBag<SceneData>();
+        int total = sceneFiles.Length;
+        int processed = 0;
+
+        Parallel.ForEach(sceneFiles,
+            new ParallelOptions { MaxDegreeOfParallelism = 3 },
+            sceneFile =>
             {
-                scripts.Add(new ScriptData(scriptData, allTrees[scriptData.Name], compilation));
-            }
-            
-            var unusedScripts = new HashSet<ScriptData>(scripts);
-            
-            foreach (var scene in scenes)
-            {
-                scene.CreateHierarchyDump(@"C:\Users\gleb3\Downloads\Temp");
-                foreach (var script in scripts)
+                try
                 {
-                    if (unusedScripts.Contains(script) && !scene.IsUnusedScript(script, scripts.ToHashSet()))
-                    {
-                        unusedScripts.Remove(script);
-                    }
+                    var data = new SceneData(sceneFile);
+                    results.Add(data);
                 }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error parsing {sceneFile.Name}: {ex.Message}");
+                }
+                finally
+                {
+                    int done = Interlocked.Increment(ref processed);
+                    if (done % 5 == 0 || done == total)
+                        Console.WriteLine($"Parsed {done}/{total} scenes...");
+                }
+            });
+        
+        return results.ToList();
+    }
 
-                if (unusedScripts.Count == 0)
-                    break;
-            }
-            
-            scripts = unusedScripts.ToList();
+        // 🔹 Compilation utilities
 
-            foreach (var script in scripts)
+    private static CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees) =>
+        CSharpCompilation.Create(
+            "UnityProjectAnalysis",
+            trees,
+            UnitySerializationAnalyzer.UnityReferences,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+        );
+
+    private static Dictionary<string, SyntaxTree> GetAllSyntaxTrees(FileData[] scripts)
+    {
+        var syntaxTrees = new ConcurrentDictionary<string, SyntaxTree>();
+
+        Parallel.ForEach(
+            scripts,
+            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+            script =>
             {
-                Console.WriteLine(script.Name);
-            }
+                try
+                {
+                    var text = File.ReadAllText(script.FilePath);
+                    var tree = CSharpSyntaxTree.ParseText(text);
+                    syntaxTrees[script.FilePath] = tree;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Error] Failed to parse {script.FilePath}: {ex.Message}");
+                }
+            });
+        
+        return new Dictionary<string, SyntaxTree>(syntaxTrees);
+    }
+
+    private static FileData[] GetMonoBehaviourScripts(
+        FileData[] allScripts,
+        IReadOnlyDictionary<string, SyntaxTree> syntaxTrees,
+        CSharpCompilation compilation)
+    {
+        var monoType = compilation.GetTypeByMetadataName("UnityEngine.MonoBehaviour");
+        if (monoType == null)
+        {
+            Console.WriteLine("Unity MonoBehaviour type not found in references");
+            return Array.Empty<FileData>();
         }
 
-        private static Dictionary<string, SyntaxTree> GetAllSyntaxTrees(FileData[] scriptDatas)
-        {
-            Dictionary<string, SyntaxTree> allTrees = new();
-            foreach (var script in scriptDatas)
+        return allScripts
+            .Where(file =>
             {
-                allTrees.Add(script.Name, CSharpSyntaxTree.ParseText(File.ReadAllText(script.FilePath)));
-            }
-            return allTrees;
-        }
-        static FileData[] GetMonoBehaviourScriptFiles(FileData[] allScripts, Dictionary<string, SyntaxTree> allTrees, CSharpCompilation compilation)
-        {
-
-            var mono = compilation.GetTypeByMetadataName("UnityEngine.MonoBehaviour");
-            if (mono == null)
-            {
-                Console.WriteLine("Unity MonoBehaviour type not found in references");
-                return [];
-            }
-
-            var results = new List<FileData>();
-
-            foreach (var file in allScripts)
-            {
-                var tree = allTrees[file.Name];
+                var tree = syntaxTrees[file.FilePath];
                 var model = compilation.GetSemanticModel(tree);
-
-                var root = tree.GetRoot();
-                var classDecl = root.DescendantNodes().OfType<ClassDeclarationSyntax>().FirstOrDefault();
-
-                if (classDecl == null)
-                    continue;
+                var classDecl = tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>().FirstOrDefault();
+                if (classDecl == null) return false;
 
                 var symbol = model.GetDeclaredSymbol(classDecl);
-                if (symbol == null)
-                    continue;
-                
-                if (UnitySerializationAnalyzer.IsUnityObject(symbol))
-                {
-                    results.Add(new FileData(file));
-                }
-            }
+                return symbol != null && UnitySerializationAnalyzer.IsUnityObject(symbol);
+            })
+            .Select(file => new FileData(file))
+            .ToArray();
+    }
+    
+    // 🔹 File utilities
 
-            return results.ToArray();
-        }
-        static FileData[] GetScriptFiles(string path)
+    private static FileData[] GetScriptFiles(string path) =>
+        Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories)
+                 .Select(file => new FileData(file))
+                 .ToArray();
+
+    private static FileData[] GetSceneFiles(string path) =>
+        Directory.GetFiles(path, "*.unity", SearchOption.AllDirectories)
+                 .Select(file => new FileData(file))
+                 .ToArray();
+    
+    private static void SaveScriptsInfoToFile(IEnumerable<ScriptData> scripts, string outputPath)
+    {
+        var directory = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+
+        using var writer = new StreamWriter(outputPath, false);
+        foreach (var script in scripts)
+            writer.WriteLine($"Script name: {script.Name} GUID: {script.GUID}");
+    }
+    
+    // 🔹 Project validation
+    
+    private static bool IsValidArgs(string[] args, out string projectPath)
+    {
+        if (args.Length < 2 || args.Length > 2)
         {
-            string[] files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+            Console.WriteLine("Usage: UnityAnalyzer <project-path> <output-path>");
+            projectPath = string.Empty;
+            return false;
+        }
 
-            List<FileData> scriptFiles = new();
-
-            foreach (var file in files)
-            {
-                scriptFiles.Add(new FileData(file));
-			}
-            return scriptFiles.ToArray();
+        projectPath = args[0];
+        if (!IsUnityProject(projectPath))
+        {
+            Console.WriteLine($"Error: '{projectPath}' is not a valid Unity project directory.");
+            return false;
         }
         
-        static FileData[] GetSceneFiles(string path)
-        {
-            string[] files = Directory.GetFiles(path, "*.unity", SearchOption.AllDirectories);
-
-            List<FileData> sceneFiles = new();
-            if (files.Length == 0)
-            {
-                return [];
-            }
-
-            foreach (var file in files) {
-                sceneFiles.Add(new FileData(file));
-            }
-            
-            return sceneFiles.ToArray();
-        }
-
-        static bool IsUnityProject(string path)
-        {
-            if (!Directory.Exists(path)) return false;
-
-            bool hasAssets = Directory.Exists(Path.Combine(path, "Assets"));
-            bool hasProjectSettings = Directory.Exists(Path.Combine(path, "ProjectSettings"));
-
-            return hasAssets && hasProjectSettings;
-        }
-
-        private static bool ValidateProject(string[] args, out string projectPath)
-        {
-            if (args.Length == 0)
-            {
-                Console.WriteLine("Usage: UnityAnalyzer <project-path>");
-                projectPath = string.Empty;
-                return false;
-            }
-
-            projectPath = args[0];
-
-            if (!IsUnityProject(projectPath))
-            {
-                Console.WriteLine($"Error: '{projectPath}' is not a valid Unity project directory.");
-                return false;
-            }
-
-            Console.WriteLine("Unity project validated ✅");
-            return true;
-        }
+        return true;
     }
+
+    private static bool IsUnityProject(string path) =>
+        Directory.Exists(path) &&
+        Directory.Exists(Path.Combine(path, "Assets")) &&
+        Directory.Exists(Path.Combine(path, "ProjectSettings"));
+}
 }

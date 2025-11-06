@@ -5,9 +5,10 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace ConsoleTool;
 
- public static class UnitySerializationAnalyzer
- { 
-     public static readonly List<MetadataReference> UnityReferences;
+public static class UnitySerializationAnalyzer
+{
+    public static readonly List<MetadataReference> UnityReferences;
+    
     private static readonly HashSet<string?> NonSerializedSystemTypes = new()
     {
         "System.Delegate",
@@ -17,10 +18,10 @@ namespace ConsoleTool;
         "System.EventHandler"
     };
 
-     static UnitySerializationAnalyzer()
-     {
-         UnityReferences = LoadUnityReferences();
-     }
+    static UnitySerializationAnalyzer()
+    {
+        UnityReferences = LoadUnityReferences();
+    }
 
     public static bool IsUnitySerializedField(FieldDeclarationSyntax field, SemanticModel model)
     {
@@ -28,7 +29,7 @@ namespace ConsoleTool;
             field.Modifiers.Any(SyntaxKind.ConstKeyword) ||
             field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword))
             return false;
-        
+
         bool isPublic = field.Modifiers.Any(SyntaxKind.PublicKeyword);
 
         bool hasSerializeFieldAttribute = field.AttributeLists
@@ -37,8 +38,7 @@ namespace ConsoleTool;
 
         if (!isPublic && !hasSerializeFieldAttribute)
             return false;
-        
-        var variable = field.Declaration.Variables.First();
+
         var typeInfo = model.GetTypeInfo(field.Declaration.Type);
         var type = typeInfo.Type;
 
@@ -56,33 +56,32 @@ namespace ConsoleTool;
         if (NonSerializedSystemTypes.Contains(type.ToString()))
             return false;
 
-        
         if (type.IsValueType || type.SpecialType == SpecialType.System_String)
             return true;
-        
-        if (type is IArrayTypeSymbol arr)
-            return IsUnitySerializableType(arr.ElementType);
-        
+
+        if (type is IArrayTypeSymbol arrayType)
+            return IsUnitySerializableType(arrayType.ElementType);
+
         if (type is INamedTypeSymbol named &&
             named.Name == "List" &&
             named.ContainingNamespace.ToString() == "System.Collections.Generic")
         {
-            var element = named.TypeArguments.First();
-            return IsUnitySerializableType(element);
+            var elementType = named.TypeArguments.FirstOrDefault();
+            return elementType != null && IsUnitySerializableType(elementType);
         }
-        
-        if (type is INamedTypeSymbol named2 &&
-            named2.Name == "Dictionary" &&
-            named2.ContainingNamespace.ToString() == "System.Collections.Generic")
+
+        if (type is INamedTypeSymbol namedDict &&
+            namedDict.Name == "Dictionary" &&
+            namedDict.ContainingNamespace.ToString() == "System.Collections.Generic")
             return false;
-        
+
         if (IsUnityObject(type))
             return true;
-        
+
         if (type.TypeKind == TypeKind.Class &&
             type.GetAttributes().Any(a => a.AttributeClass?.Name is "SerializableAttribute"))
             return true;
-        
+
         return false;
     }
 
@@ -95,8 +94,10 @@ namespace ConsoleTool;
 
             type = type.BaseType;
         }
+
         return false;
     }
+
     private static string? GetUnityEditorPath()
     {
         string hubConfigPath = Path.Combine(
@@ -116,19 +117,21 @@ namespace ConsoleTool;
 
         foreach (var entry in dataArray.EnumerateArray())
         {
-            if (!entry.TryGetProperty("location", out var locations))
+            if (!entry.TryGetProperty("location", out var locationArray))
                 continue;
 
-            var exePath = locations[0].GetString();
-            if (exePath == null) continue;
-            
+            var exePath = locationArray[0].GetString();
+            if (string.IsNullOrEmpty(exePath))
+                continue;
+
             var editorPath = Path.GetDirectoryName(exePath);
-            if (editorPath != null)
+            if (!string.IsNullOrEmpty(editorPath))
                 return editorPath;
         }
 
         return null;
     }
+
     private static List<MetadataReference> LoadUnityReferences()
     {
         var refs = new List<MetadataReference>
@@ -139,7 +142,7 @@ namespace ConsoleTool;
         string? unityPath = GetUnityEditorPath();
         if (unityPath == null)
         {
-            Console.WriteLine("⚠ Unity not found — using heuristic mode");
+            Console.WriteLine("Unity not found — using fallback mode");
             return refs;
         }
 
@@ -154,7 +157,8 @@ namespace ConsoleTool;
 
         foreach (var folder in folders)
         {
-            if (!Directory.Exists(folder)) continue;
+            if (!Directory.Exists(folder))
+                continue;
 
             foreach (var dll in Directory.EnumerateFiles(folder, "*.dll"))
             {
@@ -164,7 +168,7 @@ namespace ConsoleTool;
                 }
                 catch
                 {
-                    // some system libraries may fail — ignore
+                    // skip incompatible assemblies
                 }
             }
         }

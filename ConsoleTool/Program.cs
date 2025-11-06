@@ -175,9 +175,9 @@ namespace ConsoleTool
     
     private static bool IsValidArgs(string[] args, out string projectPath)
     {
-        if (args.Length < 2 || args.Length > 2)
+        if (args.Length < 2 || args.Length > 3)
         {
-            Console.WriteLine("Usage: UnityAnalyzer <project-path> <output-path>");
+            Console.WriteLine("Usage: required <project-path> <output-path> optional <unity-editor-path>");
             projectPath = string.Empty;
             return false;
         }
@@ -188,9 +188,24 @@ namespace ConsoleTool
             Console.WriteLine($"Error: '{projectPath}' is not a valid Unity project directory.");
             return false;
         }
+
+        if (args[2] != string.Empty)
+        {
+            if (IsUnityEditor(args[2]))
+            {
+                UnitySerializationAnalyzer.UnityEditorPath = args[2];
+            }
+        }
         
         return true;
     }
+
+    private static bool IsUnityEditor(string unityEditorPath) =>
+        Directory.Exists(unityEditorPath) &&
+        Directory.Exists(Path.Combine(unityEditorPath, @"Data\Managed")) &&
+        Directory.Exists(Path.Combine(unityEditorPath, @"Data\Managed\UnityEngine")) &&
+        Directory.Exists(Path.Combine(unityEditorPath, @"Data\NetStandard\compat"));
+    
 
     private static bool IsUnityProject(string path) =>
         Directory.Exists(path) &&

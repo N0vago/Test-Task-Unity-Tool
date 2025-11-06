@@ -7,8 +7,9 @@ namespace ConsoleTool;
 
 public static class UnitySerializationAnalyzer
 {
-    public static readonly List<MetadataReference> UnityReferences;
-    
+    private static List<MetadataReference>? _unityReferences;
+    private static string? _unityEditorPath;
+
     private static readonly HashSet<string?> NonSerializedSystemTypes = new()
     {
         "System.Delegate",
@@ -18,9 +19,23 @@ public static class UnitySerializationAnalyzer
         "System.EventHandler"
     };
 
-    static UnitySerializationAnalyzer()
+    public static string? UnityEditorPath
     {
-        UnityReferences = LoadUnityReferences();
+        get => _unityEditorPath;
+        set
+        {
+            _unityEditorPath = value;
+            _unityReferences = null; // сбросить, чтобы пересоздалось
+        }
+    }
+
+    public static List<MetadataReference> UnityReferences
+    {
+        get
+        {
+            if (_unityEditorPath != null) return _unityReferences ??= LoadUnityReferences(_unityEditorPath);
+            return _unityReferences ??= LoadUnityReferences();
+        }
     }
 
     public static bool IsUnitySerializedField(FieldDeclarationSyntax field, SemanticModel model)
@@ -48,7 +63,7 @@ public static class UnitySerializationAnalyzer
         return IsUnitySerializableType(type);
     }
 
-    public static bool IsUnitySerializableType(ITypeSymbol type)
+    private static bool IsUnitySerializableType(ITypeSymbol type)
     {
         if (type.TypeKind == TypeKind.Delegate)
             return false;
@@ -103,7 +118,7 @@ public static class UnitySerializationAnalyzer
         string hubConfigPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "UnityHub",
-            "editors-v2.json"
+            "editors-v2.json" //May differ depending on Unity version, if doesn't work try to find similar file in AppData/Roaming/UnityHub. It most likely have similar signature
         );
 
         if (!File.Exists(hubConfigPath))
@@ -132,14 +147,14 @@ public static class UnitySerializationAnalyzer
         return null;
     }
 
-    private static List<MetadataReference> LoadUnityReferences()
+    private static List<MetadataReference> LoadUnityReferences(string unityEditorPath = "")
     {
         var refs = new List<MetadataReference>
         {
             MetadataReference.CreateFromFile(typeof(object).Assembly.Location)
         };
 
-        string? unityPath = GetUnityEditorPath();
+        string? unityPath = unityEditorPath != string.Empty ? unityEditorPath : GetUnityEditorPath();
         if (unityPath == null)
         {
             Console.WriteLine("Unity not found — using fallback mode");

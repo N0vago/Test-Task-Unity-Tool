@@ -1,5 +1,4 @@
-﻿using System.Text.Json;
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -7,9 +6,6 @@ namespace ConsoleTool;
 
 public static class UnitySerializationAnalyzer
 {
-    private static List<MetadataReference>? _unityReferences;
-    private static string? _unityEditorPath;
-
     private static readonly HashSet<string?> NonSerializedSystemTypes = new()
     {
         "System.Delegate",
@@ -19,100 +15,117 @@ public static class UnitySerializationAnalyzer
         "System.EventHandler"
     };
 
-    public static string? UnityEditorPath
-    {
-        get => _unityEditorPath;
-        set
-        {
-            _unityEditorPath = value;
-            _unityReferences = null; // сбросить, чтобы пересоздалось
-        }
-    }
+    private static List<MetadataReference> DefaultReferences =
+    [
+        MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+        MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location)
+    ];
 
-    public static List<MetadataReference> UnityReferences
-    {
-        get
-        {
-            if (_unityEditorPath != null) return _unityReferences ??= LoadUnityReferences(_unityEditorPath);
-            return _unityReferences ??= LoadUnityReferences();
-        }
-    }
 
-    public static bool IsUnitySerializedField(FieldDeclarationSyntax field, SemanticModel model)
+    public static bool IsUnitySerializedField(FieldDeclarationSyntax field)
     {
-        if (field.Modifiers.Any(SyntaxKind.StaticKeyword) ||
-            field.Modifiers.Any(SyntaxKind.ConstKeyword) ||
-            field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword))
+        if (field.Modifiers.Any(m =>
+                m.IsKind(SyntaxKind.StaticKeyword) ||
+                m.IsKind(SyntaxKind.ConstKeyword) ||
+                m.IsKind(SyntaxKind.ReadOnlyKeyword)))
             return false;
 
-        bool isPublic = field.Modifiers.Any(SyntaxKind.PublicKeyword);
+        bool isPublic = field.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword));
 
         bool hasSerializeFieldAttribute = field.AttributeLists
             .SelectMany(a => a.Attributes)
-            .Any(a => a.Name.ToString() is "SerializeField" or "SerializeFieldAttribute");
-
+            .Any(a =>
+            {
+                string name = a.Name.ToString();
+                return name == "SerializeField" ||
+                       name == "SerializeFieldAttribute" ||
+                       name.EndsWith(".SerializeField") ||
+                       name.EndsWith(".SerializeFieldAttribute");
+            });
+        
         if (!isPublic && !hasSerializeFieldAttribute)
             return false;
+        
+        var typeSyntax = field.Declaration.Type;
+        string typeName = typeSyntax.ToString();
 
-        var typeInfo = model.GetTypeInfo(field.Declaration.Type);
-        var type = typeInfo.Type;
-
-        if (type == null)
-            return false;
-
-        return IsUnitySerializableType(type);
+        return IsUnitySerializableType(typeName);
     }
 
-    private static bool IsUnitySerializableType(ITypeSymbol type)
+    private static bool IsUnitySerializableType(string typeName)
     {
-        if (type.TypeKind == TypeKind.Delegate)
+        if (typeName.Contains("Action") || typeName.Contains("Func") || typeName.Contains("EventHandler"))
             return false;
-
-        if (NonSerializedSystemTypes.Contains(type.ToString()))
+        
+        if (NonSerializedSystemTypes.Contains(typeName))
             return false;
-
-        if (type.IsValueType || type.SpecialType == SpecialType.System_String)
+        
+        if (IsUnityPrimitive(typeName))
             return true;
-
-        if (type is IArrayTypeSymbol arrayType)
-            return IsUnitySerializableType(arrayType.ElementType);
-
-        if (type is INamedTypeSymbol named &&
-            named.Name == "List" &&
-            named.ContainingNamespace.ToString() == "System.Collections.Generic")
+        
+        if (typeName.EndsWith("[]"))
         {
-            var elementType = named.TypeArguments.FirstOrDefault();
-            return elementType != null && IsUnitySerializableType(elementType);
+            var elementType = typeName[..^2];
+            return IsUnitySerializableType(elementType);
         }
-
-        if (type is INamedTypeSymbol namedDict &&
-            namedDict.Name == "Dictionary" &&
-            namedDict.ContainingNamespace.ToString() == "System.Collections.Generic")
+        
+        if (typeName.StartsWith("List<") && typeName.EndsWith(">"))
+        {
+            var elementType = typeName.Substring(5, typeName.Length - 6);
+            return IsUnitySerializableType(elementType);
+        }
+        
+        if (typeName.StartsWith("Dictionary<"))
             return false;
-
-        if (IsUnityObject(type))
+        
+        if (IsUnityObject(typeName))
             return true;
-
-        if (type.TypeKind == TypeKind.Class &&
-            type.GetAttributes().Any(a => a.AttributeClass?.Name is "SerializableAttribute"))
-            return true;
-
-        return false;
+        
+        return typeName.Contains("[Serializable]");
     }
 
-    public static bool IsUnityObject(ITypeSymbol? type)
+    private static bool IsUnityObject(string typeName)
     {
-        while (type != null)
+        return typeName switch
         {
-            if (type.ToString() == "UnityEngine.Object")
-                return true;
-
-            type = type.BaseType;
-        }
-
-        return false;
+            "MonoBehaviour" or
+            "ScriptableObject" or
+            "GameObject" or
+            "Component" or
+            "Transform" or
+            "RectTransform" or
+            "Material" or
+            "Texture" or
+            "Sprite" or
+            "Object" or
+            "UnityEngine.MonoBehaviour" or
+            "UnityEngine.GameObject" or
+            "UnityEngine.Component" or
+            "UnityEngine.ScriptableObject" => true,
+            _ => false
+        };
     }
 
+    private static bool IsUnityPrimitive(string typeName)
+    {
+        return typeName switch
+        {
+            "int" or "float" or "double" or "bool" or "string" or
+            "Vector2" or "Vector3" or "Vector4" or
+            "Quaternion" or "Color" or "Rect" or "AnimationCurve" or
+            "Bounds" or "Gradient" or "LayerMask" or
+            "UnityEngine.Vector2" or "UnityEngine.Vector3" or "UnityEngine.Color" => true,
+            _ => false
+        };
+    }
+#if T
+    public static CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees) =>
+            CSharpCompilation.Create(
+                "UnityProjectAnalysis",
+                trees,
+                DefaultReferences,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            );
     private static string? GetUnityEditorPath()
     {
         string hubConfigPath = Path.Combine(
@@ -191,4 +204,5 @@ public static class UnitySerializationAnalyzer
         Console.WriteLine($"Loaded {refs.Count} Unity references");
         return refs;
     }
+#endif
 }

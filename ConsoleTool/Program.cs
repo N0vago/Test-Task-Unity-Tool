@@ -30,12 +30,11 @@ namespace ConsoleTool
         }
 
         var syntaxTrees = GetAllSyntaxTrees(scripts);
-        var compilation = CreateCompilation(syntaxTrees.Values);
-        var monoBehaviourScripts = GetMonoBehaviourScripts(scripts, syntaxTrees, compilation);
+        var monoBehaviourScripts = GetMonoBehaviourScripts(scripts, syntaxTrees);
 
         var sceneData = GetSceneDatas(scenes);
         var scriptData = monoBehaviourScripts
-            .Select(file => new ScriptData(file, syntaxTrees[file.FilePath], compilation))
+            .Select(file => new ScriptData(file, syntaxTrees[file.FilePath]))
             .ToList();
 
         var unusedScripts = new HashSet<ScriptData>(scriptData);
@@ -88,14 +87,7 @@ namespace ConsoleTool
     }
 
         // 🔹 Compilation utilities
-
-    private static CSharpCompilation CreateCompilation(IEnumerable<SyntaxTree> trees) =>
-        CSharpCompilation.Create(
-            "UnityProjectAnalysis",
-            trees,
-            UnitySerializationAnalyzer.UnityReferences,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-        );
+        
 
     private static Dictionary<string, SyntaxTree> GetAllSyntaxTrees(FileData[] scripts)
     {
@@ -123,29 +115,68 @@ namespace ConsoleTool
 
     private static FileData[] GetMonoBehaviourScripts(
         FileData[] allScripts,
-        IReadOnlyDictionary<string, SyntaxTree> syntaxTrees,
-        CSharpCompilation compilation)
+        IReadOnlyDictionary<string, SyntaxTree> syntaxTrees)
     {
-        var monoType = compilation.GetTypeByMetadataName("UnityEngine.MonoBehaviour");
-        if (monoType == null)
+        var monoScripts = new List<FileData>();
+
+        foreach (var file in allScripts)
         {
-            Console.WriteLine("Unity MonoBehaviour type not found in references");
-            return Array.Empty<FileData>();
+            if (!syntaxTrees.TryGetValue(file.FilePath, out var tree))
+                continue;
+
+            var root = tree.GetRoot();
+            
+            var classDecls = root.DescendantNodes()
+                .OfType<ClassDeclarationSyntax>();
+
+            foreach (var classDecl in classDecls)
+            {
+                if (InheritsFromMonoBehaviour(classDecl, syntaxTrees))
+                {
+                    monoScripts.Add(file);
+                    break;
+                }
+            }
         }
 
-        return allScripts
-            .Where(file =>
-            {
-                var tree = syntaxTrees[file.FilePath];
-                var model = compilation.GetSemanticModel(tree);
-                var classDecl = tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>().FirstOrDefault();
-                if (classDecl == null) return false;
+        return monoScripts.ToArray();
+    }
+    
+    private static bool InheritsFromMonoBehaviour(
+        ClassDeclarationSyntax classDecl,
+        IReadOnlyDictionary<string, SyntaxTree> syntaxTrees,
+        HashSet<string>? visitedClasses = null)
+    {
+        visitedClasses ??= new HashSet<string>();
 
-                var symbol = model.GetDeclaredSymbol(classDecl);
-                return symbol != null && UnitySerializationAnalyzer.IsUnityObject(symbol);
-            })
-            .Select(file => new FileData(file))
-            .ToArray();
+        var baseType = classDecl.BaseList?
+            .Types.FirstOrDefault()?
+            .Type.ToString();
+
+        if (string.IsNullOrEmpty(baseType))
+            return false;
+        
+        if (baseType == "MonoBehaviour" || baseType.EndsWith(".MonoBehaviour"))
+            return true;
+        
+        if (!visitedClasses.Add(baseType))
+            return false;
+        
+        foreach (var tree in syntaxTrees.Values)
+        {
+            var baseClassDecl = tree.GetRoot()
+                .DescendantNodes()
+                .OfType<ClassDeclarationSyntax>()
+                .FirstOrDefault(c => c.Identifier.Text == baseType);
+
+            if (baseClassDecl != null)
+            {
+                if (InheritsFromMonoBehaviour(baseClassDecl, syntaxTrees, visitedClasses))
+                    return true;
+            }
+        }
+
+        return false;
     }
     
     // 🔹 File utilities
@@ -175,9 +206,9 @@ namespace ConsoleTool
     
     private static bool IsValidArgs(string[] args, out string projectPath)
     {
-        if (args.Length < 2 || args.Length > 3)
+        if (args.Length < 2 || args.Length > 2)
         {
-            Console.WriteLine("Usage: required <project-path> <output-path> optional <unity-editor-path>");
+            Console.WriteLine("Usage: required <project-path> <output-path>");
             projectPath = string.Empty;
             return false;
         }
@@ -188,24 +219,9 @@ namespace ConsoleTool
             Console.WriteLine($"Error: '{projectPath}' is not a valid Unity project directory.");
             return false;
         }
-
-        if (args[2] != string.Empty)
-        {
-            if (IsUnityEditor(args[2]))
-            {
-                UnitySerializationAnalyzer.UnityEditorPath = args[2];
-            }
-        }
         
         return true;
     }
-
-    private static bool IsUnityEditor(string unityEditorPath) =>
-        Directory.Exists(unityEditorPath) &&
-        Directory.Exists(Path.Combine(unityEditorPath, @"Data\Managed")) &&
-        Directory.Exists(Path.Combine(unityEditorPath, @"Data\Managed\UnityEngine")) &&
-        Directory.Exists(Path.Combine(unityEditorPath, @"Data\NetStandard\compat"));
-    
 
     private static bool IsUnityProject(string path) =>
         Directory.Exists(path) &&

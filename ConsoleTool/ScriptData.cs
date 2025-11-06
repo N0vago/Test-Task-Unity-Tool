@@ -12,13 +12,13 @@ public class ScriptData
     public string GUID { get; }
     public HashSet<string> SerializedFields { get; }
 
-    public ScriptData(FileData scriptData, SyntaxTree syntaxTree, CSharpCompilation compilation)
+    public ScriptData(FileData scriptData, SyntaxTree syntaxTree)
     {
         try
         {
             Name = scriptData.Name;
             GUID = ParseGuidFromMeta(scriptData.MetaFilePath);
-            SerializedFields = ExtractSerializedFields(syntaxTree, compilation);
+            SerializedFields = ExtractSerializedFields(syntaxTree);
         }
         catch (Exception e)
         {
@@ -29,21 +29,35 @@ public class ScriptData
         }
     }
 
-    private static HashSet<string> ExtractSerializedFields(SyntaxTree tree, CSharpCompilation compilation)
+    private static HashSet<string> ExtractSerializedFields(SyntaxTree tree)
     {
-        var model = compilation.GetSemanticModel(tree);
         var root = tree.GetRoot();
-
         var result = new HashSet<string>();
+        
         var fields = root.DescendantNodes().OfType<FieldDeclarationSyntax>();
 
         foreach (var field in fields)
         {
-            if (!UnitySerializationAnalyzer.IsUnitySerializedField(field, model))
+            if (field.Modifiers.Any(m => 
+                    m.IsKind(SyntaxKind.StaticKeyword) || 
+                    m.IsKind(SyntaxKind.ConstKeyword) || 
+                    m.IsKind(SyntaxKind.ReadOnlyKeyword)))
                 continue;
 
-            var variable = field.Declaration.Variables.FirstOrDefault();
-            if (variable != null)
+            bool isPublic = field.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword));
+            bool hasSerializeFieldAttribute = field.AttributeLists
+                .SelectMany(a => a.Attributes)
+                .Any(a =>
+                {
+                    string name = a.Name.ToString();
+                    return name == "SerializeField" || name == "SerializeFieldAttribute" ||
+                           name.EndsWith(".SerializeField") || name.EndsWith(".SerializeFieldAttribute");
+                });
+            
+            if (!isPublic && !hasSerializeFieldAttribute)
+                continue;
+            
+            foreach (var variable in field.Declaration.Variables)
                 result.Add(variable.Identifier.Text);
         }
 

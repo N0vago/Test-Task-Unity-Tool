@@ -15,13 +15,6 @@ public static class UnitySerializationAnalyzer
         "System.EventHandler"
     };
 
-    private static List<MetadataReference> DefaultReferences =
-    [
-        MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
-        MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location)
-    ];
-
-
     public static bool IsUnitySerializedField(FieldDeclarationSyntax field)
     {
         if (field.Modifiers.Any(m =>
@@ -113,8 +106,7 @@ public static class UnitySerializationAnalyzer
             "int" or "float" or "double" or "bool" or "string" or
             "Vector2" or "Vector3" or "Vector4" or
             "Quaternion" or "Color" or "Rect" or "AnimationCurve" or
-            "Bounds" or "Gradient" or "LayerMask" or
-            "UnityEngine.Vector2" or "UnityEngine.Vector3" or "UnityEngine.Color" => true,
+            "Bounds" or "Gradient" or "LayerMask" => true,
             _ => false
         };
     }

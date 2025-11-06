@@ -85,10 +85,7 @@ namespace ConsoleTool
         
         return results.ToList();
     }
-
-        // 🔹 Compilation utilities
-        
-
+    
     private static Dictionary<string, SyntaxTree> GetAllSyntaxTrees(FileData[] scripts)
     {
         var syntaxTrees = new ConcurrentDictionary<string, SyntaxTree>();

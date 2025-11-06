@@ -1,6 +1,4 @@
-﻿using System.Reflection;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using YamlDotNet.RepresentationModel;
 
@@ -38,24 +36,7 @@ public class ScriptData
 
         foreach (var field in fields)
         {
-            if (field.Modifiers.Any(m => 
-                    m.IsKind(SyntaxKind.StaticKeyword) || 
-                    m.IsKind(SyntaxKind.ConstKeyword) || 
-                    m.IsKind(SyntaxKind.ReadOnlyKeyword)))
-                continue;
-
-            bool isPublic = field.Modifiers.Any(m => m.IsKind(SyntaxKind.PublicKeyword));
-            bool hasSerializeFieldAttribute = field.AttributeLists
-                .SelectMany(a => a.Attributes)
-                .Any(a =>
-                {
-                    string name = a.Name.ToString();
-                    return name == "SerializeField" || name == "SerializeFieldAttribute" ||
-                           name.EndsWith(".SerializeField") || name.EndsWith(".SerializeFieldAttribute");
-                });
-            
-            if (!isPublic && !hasSerializeFieldAttribute)
-                continue;
+            if(!UnitySerializationAnalyzer.IsUnitySerializedField(field)) continue;
             
             foreach (var variable in field.Declaration.Variables)
                 result.Add(variable.Identifier.Text);
